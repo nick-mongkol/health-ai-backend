@@ -10,7 +10,7 @@ from flask_cors import CORS
 import tensorflow as tf
 
 app = Flask(__name__)
-CORS(app)  # Enable CORS untuk Flutter app
+CORS(app, resources={r"/*": {"origins": "*"}})  # Enable CORS untuk Flutter app secara explicit
 
 # Load model saat startup
 MODEL_PATH = os.environ.get('MODEL_PATH', 'fitbit_complete_model.keras')
@@ -24,6 +24,9 @@ except Exception as e:
     print(f"❌ Error loading model: {e}")
     model = None
 
+# Input labels (features)
+INPUT_LABELS = ['steps', 'calories', 'heart_rate', 'stress']
+
 # Output labels sesuai spesifikasi
 OUTPUT_LABELS = [
     'sleep_score',
@@ -33,8 +36,35 @@ OUTPUT_LABELS = [
     'readiness_score'
 ]
 
-# Input labels untuk validasi
-INPUT_LABELS = ['StepTotal', 'Calories', 'heart_rate', 'stress']
+# Normalization parameters (based on typical health data ranges)
+# [min, max] for each feature
+NORMALIZATION_PARAMS = {
+    'steps': [0, 20000],
+    'calories': [0, 4000],
+    'heart_rate': [40, 180],
+    'stress': [0, 100]
+}
+
+def normalize_data(data):
+    """
+    Min-Max normalization untuk input data
+    data: shape (1, 6, 4) or similar
+    """
+    data_norm = np.copy(data)
+    
+    # Iterate over features (last dimension)
+    # 0: steps, 1: calories, 2: heart_rate, 3: stress
+    features_indices = [0, 1, 2, 3] # Indices corresponding to INPUT_LABELS
+    feature_keys = ['steps', 'calories', 'heart_rate', 'stress']
+    
+    for i, key in zip(features_indices, feature_keys):
+        min_val, max_val = NORMALIZATION_PARAMS[key]
+        # Normalize: (x - min) / (max - min)
+        # Clip values to range [min, max] first to avoid outliers
+        data_norm[:, :, i] = np.clip(data_norm[:, :, i], min_val, max_val)
+        data_norm[:, :, i] = (data_norm[:, :, i] - min_val) / (max_val - min_val)
+        
+    return data_norm
 
 
 @app.route('/health', methods=['GET'])
@@ -46,7 +76,8 @@ def health_check():
         'input_shape': '(1, 6, 4) - 6 timesteps x 4 features',
         'output_shape': '(1, 5) - 5 fitness scores',
         'input_features': INPUT_LABELS,
-        'output_scores': OUTPUT_LABELS
+        'output_scores': OUTPUT_LABELS,
+        'normalization': 'MinMax Scaling applied on server (High values -> High scores)'
     })
 
 
@@ -54,30 +85,7 @@ def health_check():
 def predict():
     """
     Predict fitness scores dari data kesehatan
-    
-    Expected JSON body:
-    {
-        "data": [
-            [steps, calories, heart_rate, stress],  // timestep 1
-            [steps, calories, heart_rate, stress],  // timestep 2
-            [steps, calories, heart_rate, stress],  // timestep 3
-            [steps, calories, heart_rate, stress],  // timestep 4
-            [steps, calories, heart_rate, stress],  // timestep 5
-            [steps, calories, heart_rate, stress]   // timestep 6
-        ]
-    }
-    
-    Returns:
-    {
-        "success": true,
-        "predictions": {
-            "sleep_score": 0.85,
-            "hrv_score": 0.72,
-            "rhr_score": 0.68,
-            "recovery_score": 0.79,
-            "readiness_score": 0.81
-        }
-    }
+    ...
     """
     if model is None:
         return jsonify({
@@ -111,12 +119,19 @@ def predict():
                     'error': f'Timestep {i+1} should have 4 features, got {len(row)}'
                 }), 400
         
-        # Convert to numpy array dan reshape untuk model
         # Model expects shape: (batch_size, timesteps, features) = (1, 6, 4)
         input_array = np.array(input_data, dtype=np.float32).reshape(1, 6, 4)
         
+        # Apply normalization
+        input_array_scaled = normalize_data(input_array)
+        
+        print(f"DEBUG: Input shape: {input_array.shape}")
+        print(f"DEBUG: Raw Data Stats - Min: {np.min(input_array):.2f}, Max: {np.max(input_array):.2f}, Mean: {np.mean(input_array):.2f}")
+        print(f"DEBUG: Scaled Data Stats - Min: {np.min(input_array_scaled):.2f}, Max: {np.max(input_array_scaled):.2f}, Mean: {np.mean(input_array_scaled):.2f}")
+        
         # Run prediction
-        predictions = model.predict(input_array, verbose=0)
+        predictions = model.predict(input_array_scaled, verbose=0)
+        print(f"DEBUG: Raw predictions output: {predictions}")
         
         # Format output - handle both single output and multi-output models
         result = {
@@ -133,14 +148,25 @@ def predict():
                     val = predictions[i]
                     if hasattr(val, 'flatten'):
                         val = val.flatten()[0]
-                    result['predictions'][label] = float(val)
+                    
+                    val = float(val)
+                    # Heuristic: if <= 1.0, assume 0-1 and scale. Else assume 0-100.
+                    if val <= 1.0 and val > 0: # Check >0 to avoid scaling 0
+                         result['predictions'][label] = val * 100
+                    else:
+                         result['predictions'][label] = val
                 else:
                     result['predictions'][label] = 0.0
         else:
             # Single output model: predictions is shape (1, 5)
             for i, label in enumerate(OUTPUT_LABELS):
                 if i < predictions.shape[-1]:
-                    result['predictions'][label] = float(predictions[0][i])
+                    val = float(predictions[0][i])
+                    # Heuristic: if small value, assume 0-1 range and scale to percentage
+                    if val <= 1.0 and val > 0:
+                        result['predictions'][label] = val * 100
+                    else:
+                        result['predictions'][label] = val
                 else:
                     result['predictions'][label] = 0.0
         
