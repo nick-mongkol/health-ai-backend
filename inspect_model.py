@@ -2,7 +2,7 @@ import numpy as np
 import tensorflow as tf
 import os
 
-MODEL_PATH = 'fitbit_complete_model.keras'
+MODEL_PATH = 'model_multitask_lstm2.keras'
 
 # Normalization Params (Manual copy from main.py to emulate server)
 NORMALIZATION_PARAMS = {

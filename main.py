@@ -13,7 +13,7 @@ app = Flask(__name__)
 CORS(app, resources={r"/*": {"origins": "*"}})  # Enable CORS untuk Flutter app secara explicit
 
 # Load model saat startup
-MODEL_PATH = os.environ.get('MODEL_PATH', 'model_multitask_lstm2.keras')
+MODEL_PATH = os.environ.get('MODEL_PATH', 'model_augmented.keras')
 
 try:
     model = tf.keras.models.load_model(MODEL_PATH)
